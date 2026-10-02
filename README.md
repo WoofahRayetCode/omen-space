@@ -10,6 +10,8 @@
   [![License](https://img.shields.io/badge/License-GPL%203.0-green.svg?style=flat-square)](LICENSE)
   [![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey.svg?style=flat-square)]()
   [![Built with Rust](https://img.shields.io/badge/Language-Rust-orange.svg?style=flat-square)]()
+
+  **English** · [Español](README.es.md)
 </div>
 
 > **🎉 Special Thanks:** A huge shoutout to **[@aloshy0](https://github.com/aloshy0)** for the incredible "Quick HUD Overlay" PR! Your architectural design and contributions make OMEN Space the ultimate Linux gaming tool.
