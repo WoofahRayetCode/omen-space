@@ -75,9 +75,10 @@ fn detect_ryzen_family() -> RyzenFamily {
                 cpu_family = line[idx + 1..].trim().parse().unwrap_or(0);
             }
         }
-        if line.starts_with("model\t") || line.starts_with("model ") {
-            if let Some(idx) = line.find(':') {
-                model = line[idx + 1..].trim().parse().unwrap_or(0);
+        // exact key match: "model name" must not overwrite "model"
+        if let Some((key, value)) = line.split_once(':') {
+            if key.trim() == "model" {
+                model = value.trim().parse().unwrap_or(0);
             }
         }
     }
