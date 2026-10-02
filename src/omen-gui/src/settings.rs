@@ -137,6 +137,7 @@ pub fn build_page(window: &adw::ApplicationWindow, on_lang_changed: Option<Rc<dy
         Language::Auto.display_name(),
         Language::Tr.display_name(),
         Language::En.display_name(),
+        Language::Es.display_name(),
     ]);
     lang_row.set_model(Some(&lang_model));
     lang_row.set_selected(i18n::get_selected_language().to_index());
