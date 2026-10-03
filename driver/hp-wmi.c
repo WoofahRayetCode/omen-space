@@ -334,6 +334,18 @@ static const struct dmi_system_id victus_s_thermal_profile_boards[] __initconst 
 		.driver_data = (void *)&omen_v1_no_ec_thermal_params,
 	},
 	{
+		.matches    = {DMI_MATCH(DMI_BOARD_NAME, "8A50")},
+		.driver_data = (void *)&omen_v1_no_ec_thermal_params,
+	},
+	{
+		.matches    = {DMI_MATCH(DMI_BOARD_NAME, "8E0F")},
+		.driver_data = (void *)&omen_v1_no_ec_thermal_params,
+	},
+	{
+		.matches    = {DMI_MATCH(DMI_BOARD_NAME, "8D3F")},
+		.driver_data = (void *)&omen_v1_no_ec_thermal_params,
+	},
+	{
 		.matches    = {DMI_MATCH(DMI_BOARD_NAME, "8D87")},
 		.driver_data = (void *)&omen_v1_no_ec_thermal_params,
 	},
@@ -2213,7 +2225,7 @@ static int platform_profile_omen_set_ec(enum platform_profile_option profile)
 	 * Modern Omen boards that also appear in victus_s_thermal_profile_boards
 	 * support GPU power management (cTGP/PPAB) via the same WMI interface.
 	 * Apply GPU power settings based on the selected profile so that the
-	 * GPU is not stuck at its base TGP (e.g. 80 W on HP Omen Max 8D41).
+	 * GPU is not stuck at its base TGP (e.g. 80 W on HP Omen Max 8D41, 8A50, 8E0F).
 	 */
 	if (is_victus_s_board) {
 		switch (profile) {
