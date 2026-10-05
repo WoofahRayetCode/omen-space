@@ -15,7 +15,7 @@
         packages = {
           omen-space = pkgs.rustPlatform.buildRustPackage {
             pname = "omen-space";
-            version = "2.1.0";
+            version = "2.1.4";
 
             src = ./.;
 
@@ -115,7 +115,17 @@
             services.dbus.packages = [ self.packages.${system}.omen-space ];
             systemd.packages = [ self.packages.${system}.omen-space ];
             
-            systemd.services.omen-space-daemon.wantedBy = [ "multi-user.target" ];
+            systemd.services.omen-space-daemon = {
+              wantedBy = [ "multi-user.target" ];
+
+              # Fix #283: ensure powerprofilesctl (and its PPD D-Bus service)
+              # is resolvable inside the sandboxed systemd unit on NixOS.
+              # Without this the PATH-based discovery silently falls back to
+              # sysfs-only mode and desktop status bars lose sync with omen-space.
+              path = with pkgs; [
+                power-profiles-daemon
+              ];
+            };
             
             users.groups.omen-hw = {};
 
@@ -124,7 +134,7 @@
             boot.extraModulePackages = [
               (pkgs.linuxPackages.callPackage ({ stdenv, kernel }: stdenv.mkDerivation {
                 pname = "omen-space-driver";
-                version = "2.1.0";
+                version = "2.1.4";
                 src = "${self.packages.${system}.omen-space.src}/driver";
                 hardeningDisable = [ "pic" ];
                 nativeBuildInputs = kernel.moduleBuildDependencies;

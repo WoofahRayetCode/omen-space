@@ -338,9 +338,81 @@ impl PowerService {
     // ── Profile detection ──────────────────────────────────────────────────────
 
     fn has_custom_power_manager() -> bool {
-        std::path::Path::new("/usr/bin/tlp").exists() || 
-        std::path::Path::new("/usr/sbin/tlp").exists() || 
+        std::path::Path::new("/usr/bin/tlp").exists() ||
+        std::path::Path::new("/usr/sbin/tlp").exists() ||
         std::path::Path::new("/usr/bin/auto-cpufreq").exists()
+    }
+
+    // ── PPD two-way sync (fix #283) ────────────────────────────────────────────
+    /// Notify power-profiles-daemon of the new profile so desktop environments
+    /// (GNOME, KDE, Noctalia, etc.) that subscribe to PPD stay in sync.
+    ///
+    /// We try two paths in order:
+    ///   1. `powerprofilesctl set <profile>` — standard CLI
+    ///   2. D-Bus call to `net.hadess.PowerProfiles` — avoids PATH issues on
+    ///      NixOS sandboxed systemd units where `powerprofilesctl` may not be
+    ///      in PATH even if PPD is running.
+    ///
+    /// The whole call is wrapped in a 3 s timeout; if PPD is not installed or
+    /// not responding the function returns silently so the rest of the profile
+    /// switch is not blocked.
+    async fn sync_ppd(profile: &str) {
+        // Map omen-space profile names to the PPD profile IDs.
+        let ppd_profile = match profile {
+            "performance" => "performance",
+            "power-saver" => "power-saver",
+            _             => "balanced",
+        };
+
+        // 1. Try powerprofilesctl CLI (works on most distros).
+        let cli_result = tokio::time::timeout(
+            tokio::time::Duration::from_secs(3),
+            tokio::process::Command::new("powerprofilesctl")
+                .args(["set", ppd_profile])
+                .output(),
+        ).await;
+        match cli_result {
+            Ok(Ok(out)) if out.status.success() => {
+                info!("[PPD sync] powerprofilesctl set '{}' OK", ppd_profile);
+                return;
+            }
+            Ok(Ok(out)) => {
+                warn!(
+                    "[PPD sync] powerprofilesctl set '{}' failed (exit {}): {}",
+                    ppd_profile,
+                    out.status,
+                    String::from_utf8_lossy(&out.stderr).trim()
+                );
+            }
+            _ => {
+                // Not installed or timed out — fall through to D-Bus path.
+            }
+        }
+
+        // 2. Fallback: D-Bus call to net.hadess.PowerProfiles.
+        // This works even when powerprofilesctl is not in PATH (NixOS, etc.)
+        // as long as the PPD daemon is running.
+        if let Ok(conn) = zbus::Connection::system().await {
+            let result = tokio::time::timeout(
+                tokio::time::Duration::from_secs(3),
+                conn.call_method(
+                    Some("net.hadess.PowerProfiles"),
+                    "/net/hadess/PowerProfiles",
+                    Some("org.freedesktop.DBus.Properties"),
+                    "Set",
+                    &(
+                        "net.hadess.PowerProfiles",
+                        "ActiveProfile",
+                        zbus::zvariant::Value::from(ppd_profile),
+                    ),
+                ),
+            ).await;
+            match result {
+                Ok(Ok(_)) => info!("[PPD sync] D-Bus ActiveProfile set to '{}' OK", ppd_profile),
+                Ok(Err(e)) => warn!("[PPD sync] D-Bus call failed: {}", e),
+                Err(_)     => warn!("[PPD sync] D-Bus call to net.hadess.PowerProfiles timed out"),
+            }
+        }
     }
 
     async fn detect_current_profile() -> String {
@@ -472,15 +544,12 @@ impl PowerService {
                 }
             }
 
-            // 2. Try setting via powerprofilesctl if installed
-            if let Ok(mut child) = tokio::process::Command::new("powerprofilesctl").args(["set", profile]).spawn() {
-                if let Ok(status) = child.wait().await {
-                    if status.success() {
-                        info!("Set powerprofilesctl profile to '{}'", profile);
-                        ok = true;
-                    }
-                }
-            }
+            // 2. Notify power-profiles-daemon (fix #283 — two-way sync).
+            // sync_ppd() tries powerprofilesctl CLI first, then falls back to
+            // a direct D-Bus call so desktop status bars stay in sync even
+            // when powerprofilesctl is not in PATH (e.g. NixOS sandboxed units).
+            Self::sync_ppd(profile).await;
+            ok = true; // PPD path never blocks success of the overall switch
         }
 
         // 3. Fallback/Explicit Override: ACPI platform_profile — underscore and hyphen variants
