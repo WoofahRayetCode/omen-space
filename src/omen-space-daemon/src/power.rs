@@ -36,6 +36,30 @@ async fn sysfs_read_async(path: &str) -> Option<String> {
     tokio::fs::read_to_string(path).await.ok().map(|s| s.trim().to_string())
 }
 
+// ── ACPI health guard ──────────────────────────────────────────────────────────
+/// Returns `true` if ACPI platform_profile sysfs responds within the timeout.
+/// If ACPI is stuck (AE_AML_LOOP_TIMEOUT / AE_AML_BUFFER_LIMIT storm), the
+/// read either hangs or returns an I/O error — in that case we must NOT send
+/// further WMI commands or we make the freeze worse.
+async fn acpi_is_healthy() -> bool {
+    let paths = [
+        "/sys/firmware/acpi/platform_profile",
+        "/sys/devices/platform/hp-wmi/platform_profile",
+        "/sys/devices/platform/hp-wmi/platform-profile",
+    ];
+    for p in paths {
+        if !Path::new(p).exists() { continue; }
+        // Wrap the read in a short timeout so a frozen ACPI doesn't block us.
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(500),
+            tokio::fs::read_to_string(p),
+        ).await;
+        return matches!(result, Ok(Ok(_)));
+    }
+    // No platform_profile node — not an ACPI-driven board, assume healthy.
+    true
+}
+
 // ── Config persistence ────────────────────────────────────────────────────────
 
 const CONFIG_PATH: &str = "/etc/omen-space/power.json";
@@ -93,6 +117,10 @@ impl PowerConfig {
 struct AppState {
     active_app: Option<String>,
     pre_app_state: Option<(String, String)>,
+    /// Timestamp of last profile switch triggered by app-profile automation.
+    /// Used to throttle rapid WMI commands that cause ACPI buffer overflows
+    /// on Strix Point hardware (issue #282).
+    last_profile_switch: Option<std::time::Instant>,
 }
 
 #[derive(Clone)]
@@ -110,6 +138,7 @@ impl PowerService {
         let app_state = Arc::new(Mutex::new(AppState {
             active_app: None,
             pre_app_state: None,
+            last_profile_switch: None,
         }));
 
         let svc = Self {
@@ -220,6 +249,31 @@ impl PowerService {
             if let Some(app) = active_app {
                 if st.active_app.as_deref() != Some(&app) {
                     info!("App Profiles: Detected game launch: {}", app);
+
+                    // ── Throttle guard (fix #282) ─────────────────────────────
+                    // Rapid WMI profile switches cause AE_AML_BUFFER_LIMIT storms
+                    // on Strix Point / Hawk Point OMEN systems.  Enforce a 30 s
+                    // cooldown between automation-triggered profile changes.
+                    const PROFILE_SWITCH_COOLDOWN: std::time::Duration =
+                        std::time::Duration::from_secs(30);
+                    let cooldown_ok = st.last_profile_switch
+                        .map(|t| t.elapsed() >= PROFILE_SWITCH_COOLDOWN)
+                        .unwrap_or(true);
+
+                    if !cooldown_ok {
+                        warn!("App Profiles: profile switch throttled (cooldown active), skipping WMI call for '{}'", app);
+                        // Still record active app so we don't loop.
+                        st.active_app = Some(app.clone());
+                    } else {
+                    // ── ACPI health check (fix #282) ──────────────────────────
+                    // Do NOT send WMI commands if ACPI is already in a broken
+                    // state — this prevents cascading AE_AML_LOOP_TIMEOUT /
+                    // amdgpu SMU freeze.
+                    if !acpi_is_healthy().await {
+                        warn!("App Profiles: ACPI platform_profile unresponsive — skipping WMI commands to avoid freeze (issue #282)");
+                        st.active_app = Some(app.clone());
+                    } else {
+
                     // Save pre-app state
                     if st.pre_app_state.is_none() {
                         let current_fan = if let Some(c) = conn.as_ref() {
@@ -230,26 +284,30 @@ impl PowerService {
                         } else { "auto".to_string() };
                         st.pre_app_state = Some((current_profile, current_fan));
                     }
-                    
+
                     st.active_app = Some(app.clone());
-                    
+                    st.last_profile_switch = Some(std::time::Instant::now());
+
                     // Apply app profile
                     if let Some(prof) = app_profiles.get(&app) {
                         let p_prof = prof["power_profile"].as_str().unwrap_or("performance");
                         let p_fan = prof["fan_mode"].as_str().unwrap_or("auto");
-                        
+
                         let mut cfg = config.lock().await;
                         cfg.power_profile = p_prof.to_string();
                         cfg.save();
-                        drop(cfg); 
-                        
+                        drop(cfg);
+
                         Self::sync_omen_profile(p_prof).await;
                         Self::sync_gpu_power(p_prof).await;
-                        
+
                         if let Some(c) = conn.as_ref() {
                             let _ = c.call_method(Some("org.hp.omen"), "/org/hp/omen/Fan", Some("org.hp.omen.Fan"), "SetFanMode", &p_fan).await;
                         }
                     }
+
+                    } // end acpi_is_healthy
+                    } // end cooldown_ok
                 }
             } else {
                 if st.active_app.is_some() {
@@ -379,7 +437,23 @@ impl PowerService {
 
     /// Writes platform_profile (checks _choices) + thermal_profile — mirrors
     /// Python PowerProfileController._sync_omen_profile().
+    ///
+    /// Fix #282: Guards all WMI/sysfs writes behind an ACPI health check with a
+    /// 500 ms timeout.  If ACPI is unresponsive (e.g. AE_AML_BUFFER_LIMIT storm
+    /// caused by the OMEN 17-db1xxx Strix Point BIOS), we abort immediately
+    /// instead of flooding \_SB.WMID.WMBA with additional commands.
     async fn sync_omen_profile(profile: &str) -> bool {
+        // ── ACPI health pre-check ────────────────────────────────────────────
+        if !acpi_is_healthy().await {
+            warn!(
+                "sync_omen_profile('{}') aborted: ACPI platform_profile \
+                 unresponsive (possible AE_AML_BUFFER_LIMIT / LOOP_TIMEOUT). \
+                 Will NOT write to WMI to prevent system freeze. (fix #282)",
+                profile
+            );
+            return false;
+        }
+
         let mut ok = false;
 
         if !Self::has_custom_power_manager() {
@@ -455,13 +529,24 @@ impl PowerService {
                     })
             };
 
+            // Skip the write if the current value already matches — avoids
+            // redundant ACPI traffic on Strix Point BIOS (fix #282).
+            let current = sysfs_read_async(p).await;
+            if current.as_deref() == Some(to_write) {
+                info!("platform_profile='{}' already set via {} — skipping write", to_write, p);
+                ok = true;
+                continue;
+            }
+
             if sysfs_write_async(p, to_write).await {
                 info!("Set platform_profile='{}' via {}", to_write, p);
                 ok = true;
             }
         }
 
-        // thermal_profile / thermal-profile (both naming styles, both hp-wmi paths)
+        // thermal_profile / thermal-profile (both naming styles, both hp-wmi paths).
+        // Also skip redundant writes (fix #282: each WMI write can trigger
+        // \_SB.WMID.WMBA which overflows the Strix Point ACPI buffer).
         let thermal_val = if profile == "performance" { "1" } else { "0" };
         for p in [
             "/sys/devices/platform/hp-wmi/thermal_profile",
@@ -469,7 +554,14 @@ impl PowerService {
             "/sys/devices/platform/hp-omen/thermal_profile",
             "/sys/devices/platform/hp-omen/thermal-profile",
         ] {
-            if sysfs_exists(p) && sysfs_write_async(p, thermal_val).await {
+            if !sysfs_exists(p) { continue; }
+            let current = sysfs_read_async(p).await;
+            if current.as_deref() == Some(thermal_val) {
+                info!("thermal_profile={} already set via {} — skipping write", thermal_val, p);
+                ok = true;
+                continue;
+            }
+            if sysfs_write_async(p, thermal_val).await {
                 info!("Set thermal_profile={} via {}", thermal_val, p);
                 ok = true;
             }
