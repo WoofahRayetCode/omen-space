@@ -1,6 +1,6 @@
 use evdev::{Device, Key};
 use futures::StreamExt;
-use log::info;
+use log::{info, warn};
 use zbus::Connection;
 
 pub struct HotkeyMonitor;
@@ -15,17 +15,23 @@ impl HotkeyMonitor {
     async fn monitor_loop(connection: Connection) {
         loop {
             let mut streams = Vec::new();
+            let mut omen_device_found = false;
             if let Ok(mut dir) = tokio::fs::read_dir("/dev/input").await {
                 while let Ok(Some(entry)) = dir.next_entry().await {
                     let path = entry.path();
                     if path.to_string_lossy().contains("event") {
                         if let Ok(dev) = Device::open(&path) {
+                            let has_prog1 = dev.supported_keys()
+                                .is_some_and(|k| k.contains(Key::KEY_PROG1));
                             let is_keyboard = dev.supported_keys().is_some_and(|k| {
                                 k.contains(Key::KEY_A) || k.contains(Key::KEY_F2) || k.contains(Key::KEY_PROG1) || k.contains(Key::KEY_CALC)
                             });
                             let is_mouse = dev.supported_relative_axes().is_some_and(|a| {
                                 a.contains(evdev::RelativeAxisType::REL_X) || a.contains(evdev::RelativeAxisType::REL_Y)
                             });
+                            if has_prog1 {
+                                omen_device_found = true;
+                            }
                             if is_keyboard && !is_mouse {
                                 if let Ok(stream) = dev.into_event_stream() {
                                     info!("HotkeyMonitor: listening to {:?}", path);
@@ -35,6 +41,21 @@ impl HotkeyMonitor {
                         }
                     }
                 }
+            }
+
+            // Issue #266: If no device advertising KEY_PROG1 was found, the hp-wmi
+            // hwdb remapping may not be active (e.g. hp-omen-extra kernel module not
+            // loaded, or udev hwdb not reloaded after install). Log a diagnostic
+            // warning so users can trace the issue; hotkey_monitor still listens to
+            // all keyboards and will catch the raw AT scancode (200) if present.
+            if !omen_device_found {
+                warn!(
+                    "HotkeyMonitor: No device advertising KEY_PROG1 (Omen key) found. \
+                     Check that the hp-omen-extra kernel module is loaded (`lsmod | grep hp_omen`) \
+                     and that `udevadm hwdb --update && udevadm trigger` has been run. \
+                     Raw scancode 200 / keycode 148 will still be caught if the HP WMI \
+                     hotkeys device is present. (Issue #266)"
+                );
             }
 
             if streams.is_empty() {
@@ -62,11 +83,12 @@ impl HotkeyMonitor {
                         let key_name = if (key_code == Key::KEY_F2.code() || key_code == 60) && shift_held {
                             Some("overlay")
                         } else {
-                            // 148 = KEY_PROG1 (Omen Key mapped by hwdb)
+                            // 148 = KEY_PROG1 (Omen Key mapped by hwdb / hp-omen-extra)
+                            // 200 = raw XF86Launch2 scancode on some boards without hwdb
                             // 149 = KEY_PROG2 (P1/P2/Macro)
                             // 140 = KEY_CALC (Calculator)
                             match key_code {
-                                148 => Some("omen"),
+                                148 | 200 => Some("omen"),
                                 149 => Some("prog2"),
                                 140 => Some("calc"),
                                 256 => Some("prog3"),

@@ -23,6 +23,9 @@ mod power_automation;
 pub mod desktop_rgb;
 mod hotkey_monitor;
 
+#[cfg(test)]
+mod tests;
+
 use log::info;
 use std::error::Error;
 use zbus::connection::Builder;

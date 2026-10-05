@@ -242,6 +242,16 @@ do_build() {
             echo ""
             exit 1
         fi
+        # FIX #268: On openSUSE Tumbleweed, libhidapi-hidraw is not available as a
+        # dynamic shared library. The linker fails with:
+        #   rust-lld: error: undefined symbol: hid_send_output_report
+        # Workaround: switch to the linux-static-hidraw feature so hidapi is linked
+        # statically (hidraw via libhidraw-dev) rather than relying on the shared lib.
+        if command -v zypper &> /dev/null; then
+            echo "[fix #268] openSUSE detected: switching daemon hidapi backend to linux-static-hidraw..."
+            sed -i 's/linux-shared-hidraw/linux-static-hidraw/g' \
+                "$SCRIPT_DIR/src/omen-space-daemon/Cargo.toml" || true
+        fi
         cargo build --release
     fi
 }
