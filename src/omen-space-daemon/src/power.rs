@@ -437,7 +437,7 @@ impl PowerService {
                     .collect()
             };
 
-            let candidates: &[&str] = match profile {
+            let candidates: &[&str] = match profile.to_lowercase().as_str() {
                 "performance" => &["performance"],
                 "power-saver" => &["low-power", "quiet", "cool", "power-saver"],
                 _             => &["balanced"],
