@@ -35,6 +35,15 @@
               systemd # provides libudev for hidapi
             ];
 
+            postPatch = ''
+              substituteInPlace src/omen-gui/src/main.rs \
+                --replace-fail '"/usr/share/omen-space/assets"' "\"$out/share/omen-space/assets\""
+              substituteInPlace src/omen-gui/src/asset_resolver.rs \
+                --replace-fail '"/usr/share/omen-space/assets/{}"' "\"$out/share/omen-space/assets/{}\""
+              substituteInPlace src/omen-tray/src/main.rs \
+                --replace-fail '"/usr/share/omen-space/assets"' "\"$out/share/omen-space/assets\""
+            '';
+
             buildPhase = ''
               for crate in omen-space-daemon omen-cli omen-tray omen-gui; do
                 cargo build --release --manifest-path src/$crate/Cargo.toml
@@ -95,15 +104,16 @@
         with lib;
         let
           cfg = config.programs.omen-space;
+          system = pkgs.stdenv.hostPlatform.system;
         in {
           options.programs.omen-space = {
             enable = lib.mkEnableOption "Omen Space: HP Laptop manager for Linux";
           };
 
           config = mkIf cfg.enable {
-            environment.systemPackages = [ self.packages.${pkgs.system}.omen-space ];
-            services.dbus.packages = [ self.packages.${pkgs.system}.omen-space ];
-            systemd.packages = [ self.packages.${pkgs.system}.omen-space ];
+            environment.systemPackages = [ self.packages.${system}.omen-space ];
+            services.dbus.packages = [ self.packages.${system}.omen-space ];
+            systemd.packages = [ self.packages.${system}.omen-space ];
             
             systemd.services.omen-space-daemon.wantedBy = [ "multi-user.target" ];
             
@@ -115,7 +125,7 @@
               (pkgs.linuxPackages.callPackage ({ stdenv, kernel }: stdenv.mkDerivation {
                 pname = "omen-space-driver";
                 version = "2.1.0";
-                src = "${self.packages.${pkgs.system}.omen-space.src}/driver";
+                src = "${self.packages.${system}.omen-space.src}/driver";
                 hardeningDisable = [ "pic" ];
                 nativeBuildInputs = kernel.moduleBuildDependencies;
                 makeFlags = [
